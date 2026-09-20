@@ -1,0 +1,63 @@
+# Steam 状态推送插件默认配置
+# 请勿直接修改本文件，修改 config/config.yaml 即可
+
+# Steam Web API Key
+# 申请地址：https://steamcommunity.com/dev/apikey
+# 也可以使用环境变量 STEAM_API_KEY（yaml 中为空时生效）
+apiKey: ""
+
+# HTTP 请求配置
+request:
+  # 请求超时时间（毫秒）
+  timeout: 10000
+  # 自定义 Steam API 地址（用于连接代理服务器，而非直连 Steam）
+  # 留空则使用官方地址 https://api.steampowered.com
+  # 警告：自定义地址可能造成 API Key 泄露，请确保你信任该代理
+  baseUrl: ""
+  # 自定义地址的 HTTP Basic 认证（可选，用于限制他人连接你的代理）
+  auth:
+    username: ""
+    password: ""
+
+# 状态轮询配置
+poll:
+  # 是否启用定时轮询
+  enabled: true
+  # 固定 cron 表达式（仅当 adaptive.enabled 为 false 时生效）
+  cron: "0 */3 * * * *"
+  # 自适应轮询：根据已启用绑定人数自动调整轮询频率
+  # 开启后上面的 cron 不生效
+  adaptive:
+    enabled: true
+    # 轮询策略，按顺序匹配：满足 count < 上限 时使用对应 interval（秒）
+    # 最后一项 count 为 null 表示兜底，interval 为最大间隔（上限）
+    tiers:
+      - count: 50
+        interval: 30
+      - count: 200
+        interval: 60
+      - count: null
+        interval: 120
+
+# 推送内容开关
+push:
+  # 在线/离线/忙碌等状态变化
+  notifyPersonaState: true
+  # 游戏开始、结束、切换
+  notifyGame: true
+
+# 卡片渲染配置
+render:
+  # 渲染预置：
+  #   white = 白底立绘（内置 https://t.alcy.cc/bd）
+  #   blur  = 竖图模糊羽化（内置 https://t.alcy.cc/moemp）
+  preset: blur
+  # 自定义背景地址；留空时使用预置的内置地址
+  background: ""
+  # 背景模糊度（px），blur 预置及非白底自定义背景生效
+  backgroundBlur: 8
+  # 背景图缓存时间（秒），避免频繁请求随机图 API；为 0 时不缓存
+  backgroundCache: 60
+  # 自定义模式；留空时跟随预置，也可填写 auto / white / photo / portrait
+  # 该配置对状态卡和帮助图同时生效，帮助图与状态卡共用同一张背景素材
+  backgroundMode: ""

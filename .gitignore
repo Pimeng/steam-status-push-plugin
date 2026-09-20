@@ -1,0 +1,16 @@
+# 本机运行配置（可能包含 Steam API Key、代理地址及认证信息）
+/config/config.yaml
+
+# Yunzai 运行时数据与缓存
+/data/
+/temp/
+/logs/
+
+# Node / editor / OS
+/node_modules/
+.DS_Store
+Thumbs.db
+*.log
+*.local
+.idea/
+.vscode/
