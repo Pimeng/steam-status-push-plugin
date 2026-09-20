@@ -48,12 +48,7 @@ const HELP_SECTIONS = [
   },
   {
     title: "其他",
-    items: [
-      { cmd: "@某人 在干嘛", desc: "查看 TA 当前在玩的游戏" },
-      { cmd: "#steam 重载配置", desc: "立即热重载 config.yaml（仅主人）" },
-      { cmd: "#steam 更新 / 强制更新", desc: "更新插件（仅主人）" },
-      { cmd: "#steam 更新日志", desc: "查看最近提交" },
-    ],
+    items: [{ cmd: "@某人 在干嘛", desc: "查看 TA 当前在玩的游戏" }],
   },
 ]
 
