@@ -3,7 +3,8 @@ import plugin from "../../../lib/plugins/plugin.js"
 import common from "../../../lib/common/common.js"
 import { Config } from "../components/Config.js"
 import { Store, normalizeGroups } from "../components/Store.js"
-import { getPlayerSummaries, resolveVanityUrl, testApiKey } from "../components/SteamApi.js"
+import { getPlayerSummaries, testApiKey } from "../components/SteamApi.js"
+import { SteamIdError, resolveSteamId as resolveSteamIdInput } from "../components/SteamId.js"
 import {
   clearBackgroundCache,
   prepareRenderCache,
@@ -29,7 +30,7 @@ const HELP_SECTIONS = [
   {
     title: "绑定与账号",
     items: [
-      { cmd: "#steam 绑定 / bind <SteamID>", desc: "绑定 Steam 账号（SteamID / 主页链接）" },
+      { cmd: "#steam 绑定 / bind <标识>", desc: "绑定 Steam 账号（好友代码 / SteamID64 / 链接）" },
       { cmd: "#steam 绑定状态 / bind status", desc: "查看绑定信息与当前实时状态" },
       { cmd: "#steam 解绑 / unbind", desc: "解除绑定" },
     ],
@@ -247,12 +248,12 @@ function resolveAtTarget(e) {
 
 /**
  * 疑似邀请/分享链接：无法作为个人资料绑定
- * - s.team/p/xxx：Steam 好友快捷邀请短链
- * - steamcommunity.com 的礼物、交易、好友、聊天等非资料页链接
+ * s.team 好友邀请与 tradeoffer 交易链接已支持解析，不再拦截
+ * - steamcommunity.com 的礼物、好友、聊天等非资料页链接
  * - steam:// 客户端协议链接、帮助/商店链接
  */
 const INVITE_LINK_REG =
-  /s\.team\/|steamcommunity\.com\/(?:gift|tradeoffer|trade|friend|friends|chat)\/|steam:\/\/|help\.steampowered\.com|store\.steampowered\.com\/(?:gift|sub|bundle)/i
+  /steamcommunity\.com\/(?:gift|friend|friends|chat)\/|steam:\/\/|help\.steampowered\.com|store\.steampowered\.com\/(?:gift|sub|bundle)/i
 
 function looksLikeInviteLink(input) {
   return INVITE_LINK_REG.test(String(input ?? ""))
@@ -272,17 +273,12 @@ function buildInviteTip() {
   ].join("\n")
 }
 
+/**
+ * 解析用户输入的 Steam 标识（好友代码 / 邀请链接 / 主页链接 / 交易链接 / SteamID64），
+ * 统一得到 SteamID64。本地可解析的输入优先本地处理，仅自定义 ID 才联网。
+ */
 async function resolveSteamId(input) {
-  const text = String(input).trim()
-  const profileMatch = text.match(/steamcommunity\.com\/profiles\/(\d{17})/i)
-  if (profileMatch) return profileMatch[1]
-
-  const vanityMatch = text.match(/steamcommunity\.com\/id\/([^/?#\s]+)/i)
-  if (vanityMatch) return resolveVanityUrl(Config.apiKey, vanityMatch[1], Config.timeout)
-
-  if (/^7656119\d{10}$/.test(text)) return text
-
-  return resolveVanityUrl(Config.apiKey, text, Config.timeout)
+  return resolveSteamIdInput(input, { apiKey: Config.apiKey, timeout: Config.timeout })
 }
 
 async function fetchPlayer(steamId) {
@@ -826,7 +822,8 @@ export class steamStatusPush extends plugin {
     try {
       steamId = await resolveSteamId(input)
     } catch (error) {
-      await e.reply(this.buildMessage("查询失败", error?.message ?? String(error)))
+      const title = error instanceof SteamIdError ? "绑定失败" : "查询失败"
+      await e.reply(this.buildMessage(title, error?.message ?? String(error)))
       return true
     }
     if (!steamId) {
