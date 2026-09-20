@@ -31,13 +31,13 @@ const apps = {}
 for (let i = 0; i < files.length; i++) {
   const name = files[i].replace(/\.js$/, "")
   if (loaded[i].status !== "fulfilled") {
-    logger.error(`载入插件错误：${logger.red(name)}`)
+    logger.error(`[Steam状态推送] 载入模块错误：${logger.red(name)}`)
     logger.error(loaded[i].reason)
     continue
   }
   apps[name] = pickPlugin(loaded[i].value)
 }
 
-logger.mark("[Steam状态推送] 插件载入完毕")
+logger.info("[Steam状态推送] 插件载入完毕")
 
 export { apps }

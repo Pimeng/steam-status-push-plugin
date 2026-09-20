@@ -35,11 +35,12 @@ const HELP_SECTIONS = [
   {
     title: "推送开关",
     items: [
-      { cmd: "#steam 开启 / 启用 / 打开推送", desc: "开启状态推送（本群发送，本群接收）" },
-      { cmd: "#steam 关闭 / 禁用 / 停用推送", desc: "关闭状态推送" },
+      { cmd: "#steam 开启 / 启用 / 打开推送", desc: "开启当前群聊的状态推送" },
+      { cmd: "#steam 关闭 / 禁用 / 停用推送", desc: "关闭当前群聊的状态推送" },
+      { cmd: "#steam 禁用所有推送", desc: "移除并关闭全部群聊推送" },
       { cmd: "#steam add / 添加 [群号]", desc: "添加推送群聊（默认当前群）" },
       { cmd: "#steam del / 删除 <群号>", desc: "关闭指定群聊的推送" },
-      { cmd: "#steam enablestatus / 查看推送群聊", desc: "查看已开启推送的群聊" },
+      { cmd: "#steam enablestatus / 查看推送群聊", desc: "私聊查看已开启推送的群聊" },
     ],
   },
   {
@@ -77,6 +78,8 @@ const ENABLE_REG =
   /^#?steam\s+(?:开启|打开|启用|开始|启动|enable|start|on)(?:\s*状态)?(?:\s*推送)?\s*$/i
 const DISABLE_REG =
   /^#?steam\s+(?:关闭|关掉|禁用|停用|取消|停止|disable|stop|off)(?:\s*状态)?(?:\s*推送)?\s*$/i
+const DISABLE_ALL_REG =
+  /^#?steam\s+(?:关闭|关掉|禁用|停用|取消|停止)\s*所有\s*(?:状态\s*)?推送\s*$/i
 
 /**
  * 「@某人 在干嘛」：查看被 at 用户当前的 Steam 状态。
@@ -95,6 +98,13 @@ const TIMER_KEY = "__steamStatusPushAdaptiveTimer"
 /** 图片并行渲染的最大并发数 */
 const RENDER_CONCURRENCY = 6
 
+/** Steam GetPlayerSummaries 官方限制每次最多查询 100 个 SteamID。 */
+const PLAYER_BATCH_SIZE = 100
+
+/** 首次发送失败后最多额外重试三次。 */
+const SEND_MAX_RETRIES = 3
+const SEND_RETRY_DELAY_MS = 300
+
 let customBaseWarned = false
 
 /**
@@ -103,10 +113,11 @@ let customBaseWarned = false
 function warnCustomBase() {
   if (customBaseWarned || !Config.customBaseUrl) return
   customBaseWarned = true
-  // 本部署 bot.log_level = mark，Yunzai 默认的 logger.warn 会被 log4js 过滤掉
-  // （lib/config/log.js 有意保持默认，不去改核心），所以这里用 mark 保证看得见；
-  // 真正的失败一律用 logger.error（不受 log_level 影响，且单独落 logs/error.log）
-  logger.mark("您正在使用自定义Steam Base Url，可能造成Key泄露！")
+  logger.warn("[Steam状态推送] 您正在使用自定义Steam Base Url，可能造成Key泄露！")
+}
+
+function isGroupAdmin(e) {
+  return Boolean(e?.isMaster || e?.member?.is_admin || e?.member?.is_owner)
 }
 
 function personaStateText(state) {
@@ -263,6 +274,22 @@ async function fetchPlayer(steamId) {
   return players.find(player => String(player.steamid) === String(steamId)) || null
 }
 
+/** 按 Steam 接口上限分批查询玩家，并合并各批结果。 */
+export async function fetchPlayerSummariesBatched(
+  key,
+  steamIds,
+  timeout,
+  fetcher = getPlayerSummaries,
+) {
+  const ids = [...new Set(steamIds.map(id => String(id)).filter(Boolean))]
+  const players = []
+  for (let index = 0; index < ids.length; index += PLAYER_BATCH_SIZE) {
+    const batch = ids.slice(index, index + PLAYER_BATCH_SIZE)
+    players.push(...(await fetcher(key, batch, timeout)))
+  }
+  return players
+}
+
 async function ensureApiReady() {
   if (apiState.ready) return true
   Config.reload()
@@ -283,6 +310,45 @@ async function pushMessage(groupId, message) {
   const group = bot.pickGroup?.(target)
   if (!group) throw new Error(`无法找到群聊 ${groupId}`)
   return await group.sendMsg(message)
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** 执行发送操作；首次失败后最多再重试三次。 */
+export async function retrySend(
+  send,
+  { maxRetries = SEND_MAX_RETRIES, delayMs = SEND_RETRY_DELAY_MS, onRetry } = {},
+) {
+  let lastError
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return { ok: true, attempts: attempt + 1, value: await send() }
+    } catch (error) {
+      lastError = error
+      if (attempt >= maxRetries) break
+      onRetry?.(error, attempt + 1, maxRetries)
+      if (delayMs > 0) await sleep(delayMs * (attempt + 1))
+    }
+  }
+  return { ok: false, attempts: maxRetries + 1, error: lastError }
+}
+
+async function pushMessageWithRetry(groupId, message) {
+  const result = await retrySend(() => pushMessage(groupId, message), {
+    onRetry: (error, retry, maxRetries) => {
+      logger.warn(
+        `[Steam状态推送] 推送到群 ${groupId} 失败，将进行第 ${retry}/${maxRetries} 次重试：${error?.message ?? error}`,
+      )
+    },
+  })
+  if (!result.ok) {
+    logger.error(
+      `[Steam状态推送] 推送到群 ${groupId} 失败，已重试 ${SEND_MAX_RETRIES} 次：${result.error?.message ?? result.error}`,
+    )
+  }
+  return result.ok
 }
 
 function formatStatusLines(player) {
@@ -343,7 +409,7 @@ export function buildChangeInfo(binding, player, previous) {
   if (!lines.length) return null
 
   const text = gameEnded
-    ? gameEndedText
+    ? [gameEndedText, ...lines.filter(line => line !== gameEndedText)].join("\n")
     : leadingText || ["[Steam状态推送]", `${name}（${player.steamid}）`, ...lines].join("\n")
   return { lines, text, textOnly: gameEnded, leadingText }
 }
@@ -453,7 +519,7 @@ async function adaptiveTick() {
 async function scheduleAdaptive() {
   stopAdaptive()
   Config.reload()
-  if (!Config.adaptiveEnabled) return
+  if (!Config.pollEnabled || !Config.adaptiveEnabled) return
   let count = 0
   try {
     count = (await Store.list()).filter(item => item.enabled && item.steamId).length
@@ -501,14 +567,14 @@ async function pollStatuses() {
   if (!bindings.length) return
 
   if (!(await ensureApiReady())) {
-    logger.mark(`[Steam状态推送] 跳过轮询：${apiState.error}`)
+    logger.warn(`[Steam状态推送] 跳过轮询：${apiState.error}`)
     return
   }
 
   const steamIds = [...new Set(bindings.map(item => String(item.steamId)))]
   let players
   try {
-    players = await getPlayerSummaries(Config.apiKey, steamIds, Config.timeout)
+    players = await fetchPlayerSummariesBatched(Config.apiKey, steamIds, Config.timeout)
   } catch (error) {
     logger.error(`[Steam状态推送] 轮询失败：${error?.message ?? error}`)
     return
@@ -538,16 +604,12 @@ async function pollStatuses() {
     const { binding, player, info, groups } = jobs[i]
     if (info) {
       if (!groups.length) {
-        logger.mark(`[Steam状态推送] 绑定 ${binding.userId} 未设置推送群聊，已跳过推送`)
+        logger.warn(`[Steam状态推送] 绑定 ${binding.userId} 未设置推送群聊，已跳过推送`)
       }
       // 开始游戏发送「文字 + 状态图」；其余卡片消息保持原样，渲染失败时回退到文字。
       const message = cards[i] ? [info.leadingText, cards[i]].filter(Boolean) : info.text
       for (const groupId of groups) {
-        try {
-          await pushMessage(groupId, message)
-        } catch (error) {
-          logger.error(`[Steam状态推送] 推送到群 ${groupId} 失败：${error?.message ?? error}`)
-        }
+        await pushMessageWithRetry(groupId, message)
       }
     }
     await Store.setLastStatus(binding.userId, nextSnapshot(player, binding.lastStatus))
@@ -574,6 +636,7 @@ export class steamStatusPush extends plugin {
         { reg: LIST_REG, fnc: "enableStatus" },
         { reg: DEL_REG, fnc: "deleteGroup" },
         { reg: ADD_REG, fnc: "addGroup" },
+        { reg: DISABLE_ALL_REG, fnc: "disableAll" },
         { reg: DISABLE_REG, fnc: "disable" },
         { reg: ENABLE_REG, fnc: "enable" },
         // 「@某人 在干嘛」不走规则表：它需要绕过 onlyReplyAt（群内前缀/@机器人）过滤，
@@ -598,7 +661,7 @@ export class steamStatusPush extends plugin {
       apiState.ready = result.ok
       apiState.error = result.message
       if (result.ok) {
-        logger.mark("[Steam状态推送] API Key 校验通过")
+        logger.info("[Steam状态推送] API Key 校验通过")
       } else {
         logger.error(`[Steam状态推送] API Key 不可用：${result.message}`)
       }
@@ -608,12 +671,15 @@ export class steamStatusPush extends plugin {
       logger.error(`[Steam状态推送] 初始化失败：${apiState.error}`)
     }
 
-    if (Config.adaptiveEnabled) {
+    if (!Config.pollEnabled) {
+      stopAdaptive()
+      logger.info("[Steam状态推送] 状态轮询已禁用")
+    } else if (Config.adaptiveEnabled) {
       await scheduleAdaptive()
-      logger.mark("[Steam状态推送] 自适应轮询已启动（cron 不生效）")
+      logger.info("[Steam状态推送] 自适应轮询已启动（cron 不生效）")
     } else {
       stopAdaptive()
-      logger.mark(`[Steam状态推送] 固定轮询已启用：${Config.pollCron}`)
+      logger.info(`[Steam状态推送] 固定轮询已启用：${Config.pollCron}`)
     }
   }
 
@@ -657,7 +723,12 @@ export class steamStatusPush extends plugin {
     }
 
     const existing = await Store.get(e.user_id)
-    const existingGroups = normalizeGroups(existing)
+    // 旧版全局禁用会保留群列表；重新绑定时不能顺带恢复全部旧群。
+    const existingGroups = existing?.enabled === false ? [] : normalizeGroups(existing)
+    const previousStatus =
+      existing?.steamId && String(existing.steamId) === String(steamId)
+        ? existing.lastStatus
+        : null
     // 群内绑定时把当前群加入推送列表，同时保留已添加的群
     const groupIds = e.isGroup && e.group_id
       ? [...new Set([...existingGroups, String(e.group_id)])]
@@ -668,12 +739,14 @@ export class steamStatusPush extends plugin {
       groupIds,
       groupId: groupIds[0] || null,
       enabled: groupIds.length > 0,
-      lastStatus: nextSnapshot(player, existing?.lastStatus),
+      lastStatus: nextSnapshot(player, previousStatus),
     })
 
     const lines = ["[Steam状态推送]", "绑定成功", `Steam 用户：${player.personaname || "未知"}`, `Steam ID：${steamId}`]
     lines.push(...formatStatusLines(player))
-    if (groupIds.length) {
+    if (e.isGroup && e.group_id) {
+      lines.push("当前群推送：已启用")
+    } else if (groupIds.length) {
       lines.push(`推送群：${groupIds.join("、")}`)
       lines.push("推送：已启用")
     } else {
@@ -688,14 +761,19 @@ export class steamStatusPush extends plugin {
    * @param {object} e 消息事件
    * @param {object} binding Store 中的绑定信息
    * @param {object} [options]
-   * @param {boolean} [options.persist] 是否把这次结果写回 lastStatus
    * @param {boolean} [options.requireGame] 仅在该用户正在游戏时才回复
-   * @returns {Promise<{status: "ok"|"no-game"|"unavailable", player: object|null}>}
+   * @param {boolean} [options.fallbackToText] 图片失败时是否发送文字状态
+   * @returns {Promise<{status: "ok"|"no-game"|"render-failed"|"unavailable", player: object|null}>}
    *   ok：取到实时状态（已尝试回复卡片）
    *   no-game：取到了，但该用户没在游戏（requireGame 时出现，未回复）
+   *   render-failed：取到了实时状态，但图片渲染失败且未启用文字降级
    *   unavailable：API 不可用或查询失败（未回复）
    */
-  async replyCurrentStatusCard(e, binding, { persist = false, requireGame = false } = {}) {
+  async replyCurrentStatusCard(
+    e,
+    binding,
+    { requireGame = false, fallbackToText = false } = {},
+  ) {
     let player = null
     if (await ensureApiReady()) {
       try {
@@ -710,13 +788,21 @@ export class steamStatusPush extends plugin {
     if (requireGame && !player.gameextrainfo) return { status: "no-game", player }
 
     const snapshot = nextSnapshot(player, binding.lastStatus)
-    if (persist && binding.userId) await Store.setLastStatus(binding.userId, snapshot)
 
     const duration = snapshot.gameId ? formatDuration(Date.now() - snapshot.gameStartedAt) : ""
     const playtime = duration ? `本次游玩时长：${duration}` : ""
     const card = await renderSteamStatusCard(player, { playtime })
-    if (card) await e.reply(card)
-    return { status: "ok", player }
+    if (card) {
+      await e.reply(card)
+      return { status: "ok", player }
+    }
+    if (fallbackToText) {
+      const lines = ["[Steam状态推送]", ...formatStatusLines(player)]
+      if (playtime) lines.push(playtime)
+      await e.reply(lines.join("\n"))
+      return { status: "ok", player }
+    }
+    return { status: "render-failed", player }
   }
 
   async bindStatus(e) {
@@ -731,12 +817,17 @@ export class steamStatusPush extends plugin {
       "[Steam状态推送]",
       "绑定信息",
       `Steam ID：${binding.steamId}`,
-      `推送群：${groups.length ? groups.join("、") : "未设置"}`,
-      `推送：${binding.enabled && groups.length ? "已启用" : "已禁用"}`,
     ]
+    if (e.isGroup && e.group_id) {
+      const enabledHere = binding.enabled && groups.includes(String(e.group_id))
+      lines.push(`当前群推送：${enabledHere ? "已启用" : "未启用"}`)
+    } else {
+      lines.push(`推送群：${groups.length ? groups.join("、") : "未设置"}`)
+      lines.push(`推送：${binding.enabled && groups.length ? "已启用" : "已禁用"}`)
+    }
 
-    const { status, player } = await this.replyCurrentStatusCard(e, binding, { persist: true })
-    if (status === "ok") {
+    const { player } = await this.replyCurrentStatusCard(e, binding)
+    if (player) {
       lines.push(...formatStatusLines(player))
     } else if (binding.lastStatus) {
       lines.push(`当前状态：${personaStateText(binding.lastStatus.personastate)}`)
@@ -794,7 +885,10 @@ export class steamStatusPush extends plugin {
     const binding = await Store.get(targetId)
     if (!binding?.steamId) return "continue"
 
-    const { status } = await this.replyCurrentStatusCard(e, binding, { requireGame: true })
+    const { status } = await this.replyCurrentStatusCard(e, binding, {
+      requireGame: true,
+      fallbackToText: true,
+    })
     return status === "ok" ? true : "continue"
   }
 
@@ -810,8 +904,28 @@ export class steamStatusPush extends plugin {
       await e.reply("当前未绑定 Steam 账号，请先使用 #steam 绑定")
       return true
     }
-    await Store.setEnabled(e.user_id, false)
-    await e.reply("已禁用 Steam 状态推送")
+    if (!e.isGroup || !e.group_id) {
+      await e.reply("请在需要关闭推送的群聊中发送该指令；如需全部关闭，请发送 #steam 禁用所有推送")
+      return true
+    }
+
+    const groupId = String(e.group_id)
+    const result = await Store.removeGroup(e.user_id, groupId)
+    await e.reply(result.removed ? "已关闭当前群聊的 Steam 状态推送" : "当前群聊未开启 Steam 状态推送")
+    return true
+  }
+
+  async disableAll(e) {
+    const result = await Store.clearGroups(e.user_id)
+    if (!result.bound) {
+      await e.reply("当前未绑定 Steam 账号，请先使用 #steam 绑定")
+      return true
+    }
+    await e.reply(
+      result.removed
+        ? `已禁用所有 Steam 状态推送，共移除 ${result.removed} 个群聊`
+        : "当前未开启任何 Steam 状态推送",
+    )
     return true
   }
 
@@ -822,19 +936,15 @@ export class steamStatusPush extends plugin {
       return true
     }
 
-    // 启用时以当前群聊作为推送目标；私聊中仅允许沿用已设置的群
-    let groupId = null
-    if (e.isGroup && e.group_id) groupId = String(e.group_id)
-    else groupId = normalizeGroups(binding)[0] || null
-
-    if (!groupId) {
+    // 启用操作始终只作用于当前群，不提供“一次恢复全部群”的入口。
+    if (!e.isGroup || !e.group_id) {
       await e.reply("请在群聊中发送 #steam 启用推送，状态将推送到该群")
       return true
     }
 
+    const groupId = String(e.group_id)
     await Store.addGroup(e.user_id, groupId)
-    const groups = normalizeGroups(await Store.get(e.user_id))
-    await e.reply(`已启用 Steam 状态推送到此群聊`)
+    await e.reply("已启用当前群聊的 Steam 状态推送")
     return true
   }
 
@@ -856,7 +966,7 @@ export class steamStatusPush extends plugin {
       await e.reply("请在群聊中发送 #steam add，或使用 #steam add <群号>")
       return true
     }
-    if (arg && !sameGroup(arg, current) && !e.isMaster) {
+    if (arg && !sameGroup(arg, current) && !isGroupAdmin(e)) {
       await e.reply("只有管理员可以添加其他群聊的推送")
       return true
     }
@@ -867,10 +977,8 @@ export class steamStatusPush extends plugin {
       return true
     }
 
-    const lines = [
-      result.added ? `已添加推送群聊：${groupId}` : `该群聊已在推送列表中：${groupId}`,
-      `当前推送群聊：${result.groups.join("、")}`,
-    ]
+    const lines = [result.added ? `已添加推送群聊：${groupId}` : `该群聊已在推送列表中：${groupId}`]
+    if (!e.isGroup) lines.push(`当前推送群聊：${result.groups.join("、")}`)
     await e.reply(lines.join("\n"))
     return true
   }
@@ -893,7 +1001,7 @@ export class steamStatusPush extends plugin {
       await e.reply("请使用 #steam del <群号> 指定要关闭推送的群聊")
       return true
     }
-    if (!sameGroup(groupId, current) && !e.isMaster) {
+    if (!sameGroup(groupId, current) && !isGroupAdmin(e)) {
       await e.reply("只有管理员可以关闭其他群聊的推送")
       return true
     }
@@ -906,8 +1014,10 @@ export class steamStatusPush extends plugin {
 
     const lines = [
       result.removed ? `已关闭群聊推送：${groupId}` : `推送列表中不存在该群聊：${groupId}`,
-      `当前推送群聊：${result.groups.length ? result.groups.join("、") : "无"}`,
     ]
+    if (!e.isGroup) {
+      lines.push(`当前推送群聊：${result.groups.length ? result.groups.join("、") : "无"}`)
+    }
     if (!result.groups.length) lines.push("推送列表为空，禁用推送")
     await e.reply(lines.join("\n"))
     return true
@@ -917,6 +1027,11 @@ export class steamStatusPush extends plugin {
    * #steam enablestatus / 查看推送群聊：查看已开启推送的群聊
    */
   async enableStatus(e) {
+    if (e.isGroup) {
+      await e.reply("为保护群聊隐私，请私聊机器人查询全部推送群聊")
+      return true
+    }
+
     const binding = await Store.get(e.user_id)
     if (!binding) {
       await e.reply("当前未绑定 Steam 账号，请先使用 #steam 绑定")
@@ -939,7 +1054,7 @@ export class steamStatusPush extends plugin {
    * #steam test [game/status]：生成游戏/状态测试图并合并转发（仅管理员）
    */
   async test(e) {
-    if (!e.isMaster) {
+    if (!isGroupAdmin(e)) {
       await e.reply("该测试指令仅限管理员使用")
       return true
     }
@@ -961,7 +1076,7 @@ export class steamStatusPush extends plugin {
         if (player) base = player
       }
     } catch (error) {
-      logger.mark(`[Steam状态推送] 测试指令获取头像失败：${error?.message ?? error}`)
+      logger.warn(`[Steam状态推送] 测试指令获取头像失败：${error?.message ?? error}`)
     }
 
     const samples =

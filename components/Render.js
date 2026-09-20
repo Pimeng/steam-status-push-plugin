@@ -168,8 +168,7 @@ const BG_MAX_TRIES = 6
  */
 const measureArtEdgeViaBrowser = createBrowserMeasurer(
   async () => ((await puppeteer.browserInit()) ? puppeteer.browser : null),
-  // 本部署 log_level 为 mark，info / warn 会被 log4js 直接丢掉，只留 mark 可见
-  { onWarn: message => logger.mark(`[Steam状态推送] ${message}`) },
+  { onWarn: message => logger.warn(`[Steam状态推送] ${message}`) },
 )
 
 async function measureArtEdge(dataUri) {
@@ -204,14 +203,14 @@ async function resolveBackground(url, ttlSeconds = 60, contentRight = null) {
         contentRight,
         maxTries: BG_MAX_TRIES,
         measure: measureArtEdge,
-        onReject: (badEdge, limit) => logger.mark(
+        onReject: (badEdge, limit) => logger.debug(
           `[Steam状态推送] 背景立绘压到文字列（${badEdge}px ≤ ${limit}px），换下一张`,
         ),
-        onWarn: message => logger.mark(`[Steam状态推送] ${message}`),
+        onWarn: message => logger.warn(`[Steam状态推送] ${message}`),
       },
     )
     if (value && edge !== null && contentRight) {
-      logger.mark(`[Steam状态推送] 背景立绘左边界 ${edge}px > ${contentRight}px（第 ${tries} 张）`)
+      logger.debug(`[Steam状态推送] 背景立绘左边界 ${edge}px > ${contentRight}px（第 ${tries} 张）`)
     }
     if (value) {
       backgroundMemo.set(key, { value, expiresAt: Date.now() + ttl })

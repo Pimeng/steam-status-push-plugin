@@ -83,11 +83,12 @@ render:
 | `#steam 绑定 <SteamID或主页链接>` | 绑定 Steam 账号 |
 | `#steam 绑定状态 / 绑定 状态` | 查看绑定信息和实时状态 |
 | `#steam 解绑` | 解除绑定 |
-| `#steam 开启推送` | 在当前群开启推送 |
-| `#steam 关闭推送` | 关闭推送 |
+| `#steam 开启推送` | 仅在当前群开启推送（只能在群聊使用） |
+| `#steam 关闭推送` | 仅关闭当前群的推送（只能在群聊使用） |
+| `#steam 禁用所有推送` | 移除并关闭全部群聊推送 |
 | `#steam add [群号]` | 添加推送群，省略群号时使用当前群 |
 | `#steam del <群号>` | 删除推送群 |
-| `#steam enablestatus / enable status` | 查看推送群列表 |
+| `#steam enablestatus / enable status` | 私聊查看完整推送群列表 |
 | `@某人 在干嘛` | 对方正在游戏时发送状态卡片 |
 | `#steam test [game/status]` | 管理员生成测试图片 |
 | `#steam help` | 查看帮助 |

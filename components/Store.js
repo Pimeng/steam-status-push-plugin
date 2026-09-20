@@ -139,7 +139,8 @@ export class SteamStore {
     return this.update(data => {
       const item = data.bindings[key]
       if (!item) return { bound: false, added: false, groups: [] }
-      const groups = normalizeGroups(item)
+      // 兼容旧版“全局禁用但保留群列表”的数据：重新启用时只加入明确指定的群。
+      const groups = item.enabled === false ? [] : normalizeGroups(item)
       const added = !groups.includes(target)
       if (added) groups.push(target)
       item.groupIds = groups
@@ -168,6 +169,21 @@ export class SteamStore {
       if (!next.length) item.enabled = false
       item.updatedAt = Date.now()
       return { bound: true, removed, groups: next }
+    })
+  }
+
+  /** 清空全部推送群聊并禁用推送。 */
+  async clearGroups(userId) {
+    const key = String(userId)
+    return this.update(data => {
+      const item = data.bindings[key]
+      if (!item) return { bound: false, removed: 0 }
+      const removed = normalizeGroups(item).length
+      item.groupIds = []
+      item.groupId = null
+      item.enabled = false
+      item.updatedAt = Date.now()
+      return { bound: true, removed }
     })
   }
 
