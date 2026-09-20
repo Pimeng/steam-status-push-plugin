@@ -163,6 +163,21 @@ function formatPlaytime(gameStartedAt) {
   return text ? `（本次游玩时长：${text}）` : ""
 }
 
+/** 退出游戏通知只展示整分钟；不足一分钟时给出自然文案。 */
+function formatEndedPlaytime(gameStartedAt) {
+  const startedAt = Number(gameStartedAt)
+  const elapsed = Date.now() - startedAt
+  if (!Number.isFinite(startedAt) || startedAt <= 0 || elapsed < 0) return ""
+
+  const totalMinutes = Math.floor(elapsed / 60000)
+  if (totalMinutes < 1) return "不到1分钟"
+
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours > 0) return `${hours}小时${minutes > 0 ? `${minutes}分钟` : ""}`
+  return `${totalMinutes}分钟`
+}
+
 function extractBindInput(msg) {
   const match = String(msg ?? "").match(/^#?steam\s+(?:绑定|bind)\s+([\s\S]+?)\s*$/i)
   return match ? match[1].trim() : ""
@@ -297,9 +312,11 @@ export function buildChangeInfo(binding, player, previous) {
   const pushConfig = Config.push
   const stateChanged = Number(previous.personastate) !== Number(player.personastate)
   const gameChanged = String(previous.gameId || "") !== String(player.gameid || "")
+  const name = player.personaname || binding.personaName || player.steamid
 
   const lines = []
   let gameEnded = false
+  let gameEndedText = ""
   if (stateChanged && pushConfig.notifyPersonaState !== false) {
     lines.push(
       `状态：${personaStateText(previous.personastate)} → ${personaStateText(player.personastate)}`,
@@ -310,7 +327,9 @@ export function buildChangeInfo(binding, player, previous) {
     const nextGame = player.gameextrainfo || null
     const playtime = formatPlaytime(previous.gameStartedAt)
     if (!nextGame) {
-      lines.push(`结束游戏：${previousGame || "未知"}${playtime}`)
+      const duration = formatEndedPlaytime(previous.gameStartedAt) || "一会儿"
+      gameEndedText = `${name} 玩了 ${duration} ${previousGame || "未知游戏"} 后不玩了`
+      lines.push(gameEndedText)
       gameEnded = true
     }
     // 开始游戏时卡片正文已经展示「正在玩 <游戏名>」，变化行不再重复游戏名
@@ -319,8 +338,9 @@ export function buildChangeInfo(binding, player, previous) {
   }
   if (!lines.length) return null
 
-  const name = player.personaname || binding.personaName || player.steamid
-  const text = ["[Steam状态推送]", `${name}（${player.steamid}）`, ...lines].join("\n")
+  const text = gameEnded
+    ? gameEndedText
+    : ["[Steam状态推送]", `${name}（${player.steamid}）`, ...lines].join("\n")
   return { lines, text, textOnly: gameEnded }
 }
 
@@ -389,7 +409,7 @@ function buildStatusSamples(base) {
     player: make({ personastate: state, gameid: null, gameextrainfo: null }),
     changes:
       state === 0
-        ? ["状态：在线 → 离线", "结束游戏：Counter-Strike 2（本次游玩时长：1小时2分钟）"]
+        ? ["状态：在线 → 离线", `${base.personaname} 玩了 1小时2分钟 Counter-Strike 2 后不玩了`]
         : [`状态：在线 → ${text}`],
     playtime: "",
   }))
