@@ -74,6 +74,16 @@ render:
 
 完整配置和注释参见 [`config/default.yaml`](config/default.yaml)。
 
+### 配置热重载
+
+插件会监听 `config/config.yaml`（以及 `config/default.yaml`）的变化，保存后自动应用新配置，无需重启机器人：
+
+- API Key、代理地址与超时：立即生效，并按需重新校验。
+- 轮询开关、自适应策略与固定 cron：立即重排轮询调度。
+- 推送开关与渲染配置：后续推送立即使用新值，背景缓存会同步刷新。
+
+也可以发送 `#steam 重载配置` 手动触发（仅主人）。
+
 > `config/config.yaml` 已被 `.gitignore` 排除。请勿提交 Steam API Key、代理认证或机器人运行数据。
 
 ## 指令
@@ -92,6 +102,7 @@ render:
 | `@某人 在干嘛` | 对方正在游戏时发送状态卡片 |
 | `#steam test [game/status]` | 管理员生成测试图片 |
 | `#steam help` | 查看帮助 |
+| `#steam 重载配置` | 立即热重载 `config.yaml`（仅主人） |
 | `#steam 更新` | 拉取插件更新（仅主人） |
 | `#steam 强制更新` | 放弃已跟踪文件的本地修改并强制更新（仅主人） |
 | `#steam 更新日志 / 更新 日志` | 查看最近提交记录 |

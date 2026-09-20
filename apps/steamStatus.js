@@ -1,9 +1,11 @@
+import schedule from "node-schedule"
 import plugin from "../../../lib/plugins/plugin.js"
 import common from "../../../lib/common/common.js"
 import { Config } from "../components/Config.js"
 import { Store, normalizeGroups } from "../components/Store.js"
 import { getPlayerSummaries, resolveVanityUrl, testApiKey } from "../components/SteamApi.js"
 import {
+  clearBackgroundCache,
   prepareRenderCache,
   prepareRenderer,
   renderSteamHelpCard,
@@ -47,6 +49,7 @@ const HELP_SECTIONS = [
     title: "其他",
     items: [
       { cmd: "@某人 在干嘛", desc: "查看 TA 当前在玩的游戏" },
+      { cmd: "#steam 重载配置", desc: "立即热重载 config.yaml（仅主人）" },
       { cmd: "#steam 更新 / 强制更新", desc: "更新插件（仅主人）" },
       { cmd: "#steam 更新日志", desc: "查看最近提交" },
     ],
@@ -81,6 +84,10 @@ const DISABLE_REG =
 const DISABLE_ALL_REG =
   /^#?steam\s+(?:关闭|关掉|禁用|停用|取消|停止)\s*所有\s*(?:状态\s*)?推送\s*$/i
 
+/** 手动触发配置热重载（仅主人） */
+const RELOAD_REG =
+  /^#?steam\s+(?:配置\s*)?(?:重载|重新加载|热重载|reload)\s*(?:配置)?\s*$/i
+
 /**
  * 「@某人 在干嘛」：查看被 at 用户当前的 Steam 状态。
  * 未被 at、被 at 者未绑定 Steam 时静默忽略，把消息交还给其他插件。
@@ -93,7 +100,14 @@ const apiState = {
   error: null,
 }
 
+/** 上一次校验通过时使用的 API 连接参数，用于配置热重载时判断是否需要重新校验 */
+let apiSignature = ""
+
+/** 配置热重载订阅的取消函数 */
+let configUnsubscribe = null
+
 const TIMER_KEY = "__steamStatusPushAdaptiveTimer"
+const FIXED_JOB_KEY = "__steamStatusPushFixedJob"
 
 /** 图片并行渲染的最大并发数 */
 const RENDER_CONCURRENCY = 6
@@ -105,14 +119,16 @@ const PLAYER_BATCH_SIZE = 100
 const SEND_MAX_RETRIES = 3
 const SEND_RETRY_DELAY_MS = 300
 
-let customBaseWarned = false
+/** 已经提醒过的自定义 Base Url，配置热重载更换地址时会再次提醒 */
+let warnedBaseUrl = ""
 
 /**
  * 使用自定义 Steam Base Url 时提醒一次，避免 API Key 泄露风险被忽略
  */
 function warnCustomBase() {
-  if (customBaseWarned || !Config.customBaseUrl) return
-  customBaseWarned = true
+  const url = Config.baseUrl
+  if (!url || warnedBaseUrl === url) return
+  warnedBaseUrl = url
   logger.warn("[Steam状态推送] 您正在使用自定义Steam Base Url，可能造成Key泄露！")
 }
 
@@ -290,13 +306,39 @@ export async function fetchPlayerSummariesBatched(
   return players
 }
 
+/** 当前 API 连接参数的指纹，任一变化都意味着需要重新校验 */
+function currentApiSignature() {
+  return [
+    Config.apiKey,
+    Config.baseUrl,
+    Config.auth.username,
+    Config.auth.password,
+    Config.timeout,
+  ].join("\u0000")
+}
+
+/**
+ * 校验 API Key 并更新可用状态
+ * @param {object} [options]
+ * @param {boolean} [options.force] 为 false 时，连接参数未变化则复用上次结果
+ */
+async function refreshApiState({ force = false } = {}) {
+  const signature = currentApiSignature()
+  if (!force && signature === apiSignature) {
+    return { ok: apiState.ready, message: apiState.error }
+  }
+  apiSignature = signature
+  const result = await testApiKey(Config.apiKey, Config.timeout)
+  apiState.ready = result.ok
+  apiState.error = result.message
+  return result
+}
+
 async function ensureApiReady() {
   if (apiState.ready) return true
   Config.reload()
   warnCustomBase()
-  const result = await testApiKey(Config.apiKey, Config.timeout)
-  apiState.ready = result.ok
-  apiState.error = result.message
+  const result = await refreshApiState({ force: true })
   return result.ok
 }
 
@@ -532,6 +574,58 @@ async function scheduleAdaptive() {
   }, interval * 1000)
 }
 
+function stopFixed() {
+  if (global[FIXED_JOB_KEY]) {
+    global[FIXED_JOB_KEY].cancel()
+    global[FIXED_JOB_KEY] = null
+  }
+}
+
+/**
+ * 按配置的 cron 注册固定轮询（仅当未启用自适应时）
+ * @returns {boolean} 是否注册成功
+ */
+function startFixed() {
+  stopFixed()
+  const cron = Config.pollCron
+  try {
+    const job = schedule.scheduleJob(cron, () => {
+      pollStatuses().catch(error => {
+        logger.error(`[Steam状态推送] 轮询任务异常：${error?.message ?? error}`)
+      })
+    })
+    global[FIXED_JOB_KEY] = job || null
+    return Boolean(job)
+  } catch (error) {
+    logger.error(`[Steam状态推送] 固定轮询 cron 无效（${cron}）：${error?.message ?? error}`)
+    return false
+  }
+}
+
+/** 停止全部轮询调度 */
+function stopSchedules() {
+  stopAdaptive()
+  stopFixed()
+}
+
+/**
+ * 按当前配置启动轮询调度。
+ * 启动时与配置热重载后都会调用，保证 poll 相关配置改动立即生效。
+ */
+async function applyPollConfig() {
+  stopSchedules()
+  if (!Config.pollEnabled) {
+    logger.info("[Steam状态推送] 状态轮询已禁用")
+    return
+  }
+  if (Config.adaptiveEnabled) {
+    await scheduleAdaptive()
+    logger.info("[Steam状态推送] 自适应轮询已启动（cron 不生效）")
+    return
+  }
+  if (startFixed()) logger.info(`[Steam状态推送] 固定轮询已启用：${Config.pollCron}`)
+}
+
 /**
  * 并发受限的 map，避免同时渲染过多图片压垮浏览器
  * @template T, R
@@ -623,12 +717,8 @@ export class steamStatusPush extends plugin {
       dsc: "监控绑定用户的 Steam 在线状态与游戏动态并推送到群聊",
       event: "message",
       priority: 5000,
-      task: {
-        name: "Steam状态推送",
-        cron: Config.adaptiveEnabled ? "" : Config.pollCron,
-        fnc: () => pollStatuses(),
-        log: false,
-      },
+      // 轮询调度由 applyPollConfig 自行管理（自适应 / 固定 cron），
+      // 这样修改 poll 配置后无需重启即可热重载
       rule: [
         { reg: /^#?steam\s+(?:绑定\s*(?:状态|信息)|bind\s+status)\s*$/i, fnc: "bindStatus" },
         { reg: /^#?steam\s+(?:绑定|bind)\s+([\s\S]+?)\s*$/i, fnc: "bind" },
@@ -639,6 +729,7 @@ export class steamStatusPush extends plugin {
         { reg: DISABLE_ALL_REG, fnc: "disableAll" },
         { reg: DISABLE_REG, fnc: "disable" },
         { reg: ENABLE_REG, fnc: "enable" },
+        { reg: RELOAD_REG, fnc: "reloadConfig" },
         // 「@某人 在干嘛」不走规则表：它需要绕过 onlyReplyAt（群内前缀/@机器人）过滤，
         // 由下方 getContext 钩子在规则匹配之前抢先处理
         { reg: /^#?steam\s+(?:test|测试)(?:\s+\S+)?\s*$/i, fnc: "test" },
@@ -657,9 +748,7 @@ export class steamStatusPush extends plugin {
 
       warnCustomBase()
 
-      const result = await testApiKey(Config.apiKey, Config.timeout)
-      apiState.ready = result.ok
-      apiState.error = result.message
+      const result = await refreshApiState({ force: true })
       if (result.ok) {
         logger.info("[Steam状态推送] API Key 校验通过")
       } else {
@@ -671,16 +760,51 @@ export class steamStatusPush extends plugin {
       logger.error(`[Steam状态推送] 初始化失败：${apiState.error}`)
     }
 
-    if (!Config.pollEnabled) {
-      stopAdaptive()
-      logger.info("[Steam状态推送] 状态轮询已禁用")
-    } else if (Config.adaptiveEnabled) {
-      await scheduleAdaptive()
-      logger.info("[Steam状态推送] 自适应轮询已启动（cron 不生效）")
-    } else {
-      stopAdaptive()
-      logger.info(`[Steam状态推送] 固定轮询已启用：${Config.pollCron}`)
+    // 订阅配置热重载：config.yaml 变化时自动应用新配置
+    if (configUnsubscribe) configUnsubscribe()
+    configUnsubscribe = Config.onChange(() => {
+      this.handleConfigChange().catch(error => {
+        logger.error(`[Steam状态推送] 配置热重载失败：${error?.message ?? error}`)
+      })
+    })
+
+    await applyPollConfig()
+  }
+
+  /**
+   * 应用热重载后的配置：重新校验 API、刷新背景缓存并重排轮询调度
+   */
+  async handleConfigChange() {
+    Config.reload()
+    warnCustomBase()
+    clearBackgroundCache()
+
+    try {
+      const result = await refreshApiState()
+      if (result.ok) {
+        logger.info("[Steam状态推送] 配置热重载：API Key 校验通过")
+      } else {
+        logger.warn(`[Steam状态推送] 配置热重载：API Key 不可用：${result.message}`)
+      }
+    } catch (error) {
+      logger.warn(`[Steam状态推送] 配置热重载：API Key 校验失败：${error?.message ?? error}`)
     }
+
+    await applyPollConfig()
+    logger.info("[Steam状态推送] 配置已热重载")
+  }
+
+  /**
+   * #steam 重载配置：手动触发配置热重载（仅主人）
+   */
+  async reloadConfig(e) {
+    if (!e.isMaster) {
+      await e.reply("该指令仅限主人使用")
+      return true
+    }
+    await this.handleConfigChange()
+    await e.reply("[Steam状态推送]\n配置已热重载")
+    return true
   }
 
   async bind(e) {

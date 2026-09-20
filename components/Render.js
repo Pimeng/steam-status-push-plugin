@@ -184,6 +184,14 @@ const backgroundMemo = new Map()
 const backgroundPending = new Map()
 
 /**
+ * 配置热重载时清空背景缓存，让新的背景地址 / 缓存时间立即生效
+ * （正在进行的下载不强杀，完成后会按新配置重新缓存）
+ */
+export function clearBackgroundCache() {
+  backgroundMemo.clear()
+}
+
+/**
  * 抓取背景素材。给了 contentRight 时会校验立绘有没有压到文字列，
  * 压字就重新抽一张（背景接口每次返回随机图），最多 BG_MAX_TRIES 次。
  */

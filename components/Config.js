@@ -7,6 +7,12 @@ const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const defaultFile = path.join(pluginRoot, "config", "default.yaml")
 const configFile = path.join(pluginRoot, "config", "config.yaml")
 
+/** 参与热重载的配置文件 */
+const WATCH_FILES = new Set([path.basename(defaultFile), path.basename(configFile)])
+
+/** 一次保存常触发多个文件事件，合并到一次重载 */
+const WATCH_DEBOUNCE_MS = 250
+
 /** 内置渲染预置：选择一个名称即可同时确定背景源与版式。 */
 const RENDER_PRESETS = Object.freeze({
   white: Object.freeze({
@@ -65,7 +71,11 @@ function readYaml(file) {
 class SteamConfig {
   constructor() {
     this._data = null
+    this._listeners = new Set()
+    this._watcher = null
+    this._watchTimer = null
     this.ensureUserConfig()
+    this.watch()
   }
 
   ensureUserConfig() {
@@ -76,6 +86,65 @@ class SteamConfig {
       }
     } catch (err) {
       global.logger?.warn?.(`[Steam状态推送] 配置文件创建失败：${err?.message ?? err}`)
+    }
+  }
+
+  /**
+   * 注册配置热重载回调，返回取消订阅函数
+   * @param {(config: SteamConfig) => void} listener
+   * @returns {() => void}
+   */
+  onChange(listener) {
+    if (typeof listener !== "function") return () => {}
+    this._listeners.add(listener)
+    return () => this._listeners.delete(listener)
+  }
+
+  /**
+   * 监听配置目录实现热重载。
+   *
+   * 不直接 watch 单个文件：多数编辑器保存时是「写临时文件 + 重命名覆盖」，
+   * 目标文件被替换后原文件句柄失效，监听会失效。改看目录、按文件名过滤更稳。
+   */
+  watch() {
+    if (this._watcher) return
+    try {
+      this._watcher = fs.watch(path.dirname(configFile), (_event, filename) => {
+        const name = filename ? String(filename) : ""
+        if (name && !WATCH_FILES.has(name)) return
+        this.scheduleReload()
+      })
+      this._watcher.on?.("error", error => {
+        global.logger?.warn?.(`[Steam状态推送] 配置监听异常：${error?.message ?? error}`)
+      })
+      // 目录监听不应阻止进程退出
+      this._watcher.unref?.()
+    } catch (error) {
+      global.logger?.warn?.(
+        `[Steam状态推送] 配置热重载不可用（修改配置后需重启）：${error?.message ?? error}`,
+      )
+    }
+  }
+
+  /** 防抖：合并同一批文件事件后再重载 */
+  scheduleReload() {
+    if (this._watchTimer) clearTimeout(this._watchTimer)
+    this._watchTimer = setTimeout(() => {
+      this._watchTimer = null
+      this.handleFileChange()
+    }, WATCH_DEBOUNCE_MS)
+    this._watchTimer.unref?.()
+  }
+
+  /** 配置变化：丢弃缓存并通知订阅者 */
+  handleFileChange() {
+    this.reload()
+    for (const listener of [...this._listeners]) {
+      try {
+        listener(this)
+      } catch (error) {
+        global.logger?.error?.(`[Steam状态推送] 配置热重载回调异常：${error?.message ?? error}`)
+      }
     }
   }
 
