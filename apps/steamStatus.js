@@ -307,6 +307,7 @@ export function needsCard(job) {
  *
  * textOnly 为 true 时只发文字、不渲染卡片（目前用于「结束游戏」：
  * 游戏已经结束，卡片正文的封面与「正在玩」都不再有意义）
+ * leadingText 用于在卡片前附带一条文字（目前用于「开始游戏」）。
  */
 export function buildChangeInfo(binding, player, previous) {
   const pushConfig = Config.push
@@ -317,6 +318,7 @@ export function buildChangeInfo(binding, player, previous) {
   const lines = []
   let gameEnded = false
   let gameEndedText = ""
+  let leadingText = ""
   if (stateChanged && pushConfig.notifyPersonaState !== false) {
     lines.push(
       `状态：${personaStateText(previous.personastate)} → ${personaStateText(player.personastate)}`,
@@ -333,15 +335,17 @@ export function buildChangeInfo(binding, player, previous) {
       gameEnded = true
     }
     // 开始游戏时卡片正文已经展示「正在玩 <游戏名>」，变化行不再重复游戏名
-    else if (!previousGame) lines.push("开始游戏")
-    else lines.push(`切换游戏：${previousGame} → ${nextGame}${playtime}`)
+    else if (!previousGame) {
+      leadingText = `${name} 开始玩 ${nextGame} 了`
+      lines.push("开始游戏")
+    } else lines.push(`切换游戏：${previousGame} → ${nextGame}${playtime}`)
   }
   if (!lines.length) return null
 
   const text = gameEnded
     ? gameEndedText
-    : ["[Steam状态推送]", `${name}（${player.steamid}）`, ...lines].join("\n")
-  return { lines, text, textOnly: gameEnded }
+    : leadingText || ["[Steam状态推送]", `${name}（${player.steamid}）`, ...lines].join("\n")
+  return { lines, text, textOnly: gameEnded, leadingText }
 }
 
 const LONG_GAME_NAME = "一个非常非常长的游戏名称测试换行效果 Ultimate Deluxe Edition"
@@ -536,8 +540,8 @@ async function pollStatuses() {
       if (!groups.length) {
         logger.mark(`[Steam状态推送] 绑定 ${binding.userId} 未设置推送群聊，已跳过推送`)
       }
-      // 结束游戏只有文字；其余情况渲染失败时才回退到文字
-      const message = cards[i] ? [cards[i]] : info.text
+      // 开始游戏发送「文字 + 状态图」；其余卡片消息保持原样，渲染失败时回退到文字。
+      const message = cards[i] ? [info.leadingText, cards[i]].filter(Boolean) : info.text
       for (const groupId of groups) {
         try {
           await pushMessage(groupId, message)
