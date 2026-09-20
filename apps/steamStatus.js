@@ -64,7 +64,8 @@ const HELP_TEXT = [
 
 const ADD_REG = /^#?steam\s+(?:add|添加)\s*(\d{5,})?\s*$/i
 const DEL_REG = /^#?steam\s+(?:del|delete|删除|移除)\s*(\d{5,})?\s*$/i
-const LIST_REG = /^#?steam\s+(?:enablestatus|查看推送群聊|推送群聊列表|群聊推送列表)\s*$/i
+const LIST_REG =
+  /^#?steam\s+(?:enable\s*status|查看\s*推送\s*群聊|推送\s*群聊\s*列表|群聊\s*推送\s*列表)\s*$/i
 
 /**
  * 开启/关闭推送：放宽措辞限制。
@@ -543,7 +544,7 @@ export class steamStatusPush extends plugin {
         log: false,
       },
       rule: [
-        { reg: /^#?steam\s+(?:绑定状态|绑定信息|bind\s+status)\s*$/i, fnc: "bindStatus" },
+        { reg: /^#?steam\s+(?:绑定\s*(?:状态|信息)|bind\s+status)\s*$/i, fnc: "bindStatus" },
         { reg: /^#?steam\s+(?:绑定|bind)\s+([\s\S]+?)\s*$/i, fnc: "bind" },
         { reg: /^#?steam\s+(?:解绑|unbind)\s*$/i, fnc: "unbind" },
         { reg: LIST_REG, fnc: "enableStatus" },

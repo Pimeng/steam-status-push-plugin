@@ -15,7 +15,7 @@ export class SteamStatusUpdate extends plugin {
       priority: 1000,
       rule: [
         {
-          reg: /^#?steam\s*(?:插件\s*)?(?:更新日志|update\s*log)$/i,
+          reg: /^#?steam\s*(?:插件\s*)?(?:更新\s*日志|update\s*log)$/i,
           fnc: "updateLog",
         },
         {
